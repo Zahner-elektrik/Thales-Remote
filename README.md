@@ -1,6 +1,5 @@
 # Thales-Remote
 Example Library for using Thales Remote Script over TCP/IP in C++
-Right now only for Linux. A Windows version will be added later.
 
 # License
 Copyright 2019 ZAHNER-elektrik I. Zahner-Schiller GmbH & Co. KG

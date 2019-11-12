@@ -27,54 +27,96 @@
 #include "thalesremoteconnection.h"
 
 ThalesRemoteConnection::ThalesRemoteConnection() :
-    socket_handle(-1)
+
+    socket_handle(INVALID_SOCKET),
+    receiving_worker_is_running(false),
+    receivingWorker(nullptr)
 {
+
+#ifdef _WIN32
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2,2), &wsaData);
+#endif
+
+}
+
+ThalesRemoteConnection::~ThalesRemoteConnection() {
+
+#ifdef _WIN32
+    WSACleanup();
+#endif
 
 }
 
 bool ThalesRemoteConnection::connectToTerm(std::string address, std::string connectionName) {
 
-    struct sockaddr_in term_address;
+    this->socket_handle = socket(AF_INET, SOCK_STREAM, 0);
 
-    if ((this->socket_handle = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+#ifdef _WIN32
+    if (this->socket_handle == INVALID_SOCKET) {
+#else
+    if (this->socket_handle < 0) {
+#endif
 
-            std::cout << "could not create socket" << std::endl;
-            return false;
-    }
-
-    memset(&term_address, '0', sizeof(term_address));
-    term_address.sin_family = AF_INET;
-    term_address.sin_port = htons(260);
-
-    if (inet_pton(AF_INET, address.c_str() , &term_address.sin_addr) <= 0) {
-
-        std::cout << "invalid address" << std::endl;
+        std::cerr << "could not create socket" << std::endl;
         return false;
     }
 
-    if (connect(this->socket_handle, (struct sockaddr *)&term_address, sizeof(term_address)) < 0) {
+    // get ip by hostname and stuff
+    struct addrinfo hints = {};
+    struct addrinfo *result_pointer;
 
-          std::cout << "could not connect to term" << std::endl;
-          return false;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    if (getaddrinfo(address.data(), "260", &hints, &result_pointer) != 0) {
+
+        std::cerr << "error while resolving address" << std::endl;
+        this->closeSocket();
+        return false;
+    }
+
+    struct addrinfo *first_addr = result_pointer;
+
+    if (first_addr == nullptr) {
+
+        std::cerr << "could not resolve hostname" << std::endl;
+        freeaddrinfo(result_pointer);
+        this->closeSocket();
+        return false;
+    }
+
+    if (connect(this->socket_handle, first_addr->ai_addr, static_cast<int>(first_addr->ai_addrlen)) < 0) {
+
+        std::cerr << "could not connect to term" << std::endl;
+        this->closeSocket();
+        return false;
     }
 
     this->startTelegramListener();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
-    short payloadLength = connectionName.length();
-    char *payloadLengthPointer = reinterpret_cast<char*>(&payloadLength);
+    unsigned short payload_length = static_cast<unsigned short>(connectionName.length());
 
-    char headerData[9] =    "\x00\x00"     // Length of payload string (16 bit)
-                            "\x02\xd0"     // Protocol version (don't change)
-                            "\xff\xff"     // Buffer size (just use 0xffff for max)
-                            "\xff\xff";    // Internal protocol bytes (keep 0xffff)
+    std::vector<unsigned char> registration_packet;
 
-    headerData[1] = payloadLengthPointer[1];
-    headerData[0] = payloadLengthPointer[0];
+    registration_packet.reserve(payload_length + 6);
 
-    send(this->socket_handle, headerData, 8, MSG_MORE);
-    send(this->socket_handle, connectionName.c_str(), connectionName.length(), 0);
+    registration_packet.push_back(reinterpret_cast<unsigned char *>(&payload_length)[0]);
+    registration_packet.push_back(reinterpret_cast<unsigned char *>(&payload_length)[1]);
+
+    const std::vector<unsigned char> fixedHeaderBytes = {
+        0x02, 0xd0,     // Protocol version (don't change)
+        0xff, 0xff,     // Buffer size (just use 0xffff for max)
+        0xff, 0xff      // Internal protocol bytes (keep 0xffff)
+    };
+
+    registration_packet.insert(registration_packet.end(), fixedHeaderBytes.begin(), fixedHeaderBytes.end());
+
+    std::copy(connectionName.begin(), connectionName.end(), std::back_inserter(registration_packet));   // header
+    send(this->socket_handle, reinterpret_cast<char *>(registration_packet.data()), static_cast<int>(registration_packet.size()), 0);               // payload (here the "device name")
 
     std::this_thread::sleep_for(std::chrono::milliseconds(800));
 
@@ -84,40 +126,71 @@ bool ThalesRemoteConnection::connectToTerm(std::string address, std::string conn
 void ThalesRemoteConnection::disconnectFromTerm() {
 
     // just 0xffff on "channel" 4 is the message to disconnect for Term
+
     this->sendTelegram("\xff\xff", 4);
 
     this->stopTelegramListener();
-
-    close(this->socket_handle);
-    this->socket_handle = -1;
+    this->closeSocket();
 }
 
 bool ThalesRemoteConnection::isConnectedToTerm() const {
 
+#ifdef _WIN32
+    return (this->socket_handle != INVALID_SOCKET);
+#else
     return (this->socket_handle > 0);
+#endif
+
 }
 
 void ThalesRemoteConnection::sendTelegram(std::string payload, char message_type) {
 
-    // The header is three bytes long:
-    // - Two bytes for the length of the telegram as unsigned integer in little endian
-    // - One byte is the telegram type
-    char header_bytes[3];
+    std::vector<char> packet;
+    uint16_t payload_length = static_cast<uint16_t>(payload.size());
 
-    // Setting the length...
-    unsigned short *length_data = reinterpret_cast<unsigned short*>(header_bytes);
-    *length_data = payload.length();
+    packet.reserve(payload_length + 3);
 
-    // ...and one byte for the message type
-    header_bytes[2] = message_type;
+    // header
+    packet.push_back(reinterpret_cast<char *>(&payload_length)[0]);
+    packet.push_back(reinterpret_cast<char *>(&payload_length)[1]);
+    packet.push_back(message_type);
 
-    // First write the header into the buffer without starting the transmission
-    // NOTE: Term cannot handle just getting the header and then later the remainig packet
-    send(this->socket_handle, header_bytes, 3, MSG_MORE);
-    send(this->socket_handle, payload.c_str(), payload.length(), 0);
+    std::copy(payload.begin(), payload.end(), std::back_inserter(packet));
+
+    send(this->socket_handle, reinterpret_cast<char *>(packet.data()), static_cast<int>(packet.size()), 0);
 }
 
-std::string ThalesRemoteConnection::waitForTelegram() {
+void ThalesRemoteConnection::sendTelegram(std::vector<unsigned char> payload, unsigned char message_type) {
+
+    std::vector<unsigned char> packet;
+    uint16_t payload_length = static_cast<uint16_t>(payload.size());
+
+    packet.reserve(payload_length + 3);
+
+    // header
+    packet.push_back(reinterpret_cast<unsigned char *>(&payload_length)[0]);
+    packet.push_back(reinterpret_cast<unsigned char *>(&payload_length)[1]);
+    packet.push_back(message_type);
+
+    packet.insert(packet.end(), payload.begin(), payload.end());
+
+    send(this->socket_handle, reinterpret_cast<char *>(packet.data()), static_cast<int>(packet.size()), 0);
+}
+
+
+std::string ThalesRemoteConnection::waitForStringTelegram() {
+
+    while (this->telegramReceived() == false) {
+
+        // Make sure the thread hangs here. The mutex will be unlocked upon
+        // receiving the next telegram.
+        this->telegramsAvailableMutex.lock();
+    }
+
+    return this->receiveStringTelegram();
+}
+
+std::vector<uint8_t> ThalesRemoteConnection::waitForTelegram() {
 
     while (this->telegramReceived() == false) {
 
@@ -129,7 +202,7 @@ std::string ThalesRemoteConnection::waitForTelegram() {
     return this->receiveTelegram();
 }
 
-std::string ThalesRemoteConnection::waitForTelegram(const std::chrono::duration<int, std::milli> timeout) {
+std::vector<uint8_t> ThalesRemoteConnection::waitForTelegram(const std::chrono::duration<int, std::milli> timeout) {
 
     std::chrono::milliseconds startTime = this->getCurrentTimeInMilliseconds();
     std::chrono::duration<int, std::milli> remainingTime;
@@ -142,7 +215,7 @@ std::string ThalesRemoteConnection::waitForTelegram(const std::chrono::duration<
         // Check if the timeout has already occured
         if (elapsedTime > timeout) {
 
-            return std::string();
+            return std::vector<uint8_t>();
         }
 
         remainingTime = timeout - elapsedTime;
@@ -153,13 +226,27 @@ std::string ThalesRemoteConnection::waitForTelegram(const std::chrono::duration<
         // Just re-check after it failed and freze for the remaining time if needed.
     }
 
-    // If a telegram is received while waiting it can be delivered.
+    // If a telegram was received while waiting it can be delivered.
     return this->receiveTelegram();
 }
 
-std::string ThalesRemoteConnection::receiveTelegram() {
+std::string ThalesRemoteConnection::waitForStringTelegram(const std::chrono::duration<int, std::milli> timeout) {
 
-    std::string receivedTelegram;
+    std::vector<uint8_t> telegram = waitForTelegram(timeout);
+
+    return std::string(reinterpret_cast<char *>(telegram.data()), telegram.size());
+}
+
+std::string ThalesRemoteConnection::receiveStringTelegram() {
+
+    std::vector<uint8_t> telegram = this->receiveTelegram();
+
+    return std::string(reinterpret_cast<char *>(telegram.data()), telegram.size());
+}
+
+std::vector<uint8_t> ThalesRemoteConnection::receiveTelegram() {
+
+    std::vector<uint8_t> receivedTelegram;
 
     // Making sure we won't read from the queue while the thread might be
     // in the process of putting in a new telegram.
@@ -169,7 +256,6 @@ std::string ThalesRemoteConnection::receiveTelegram() {
 
         receivedTelegram = this->receivedTelegrams.front();
         this->receivedTelegrams.pop();
-
     }
 
     this->receivedTelegramsGuard.unlock();
@@ -177,11 +263,11 @@ std::string ThalesRemoteConnection::receiveTelegram() {
     return receivedTelegram;
 }
 
-std::string ThalesRemoteConnection::sendAndWaitForReply(std::string payload, char message_type) {
+std::string ThalesRemoteConnection::sendStringAndWaitForReplyString(std::string payload, char message_type) {
 
     // This is just a convenience method.
     this->sendTelegram(payload, message_type);
-    return this->waitForTelegram();
+    return this->waitForStringTelegram();
 }
 
 bool ThalesRemoteConnection::telegramReceived() {
@@ -208,13 +294,18 @@ void ThalesRemoteConnection::clearIncomingTelegramQueue() {
     this->receivedTelegramsGuard.unlock();
 }
 
-std::string ThalesRemoteConnection::readTelegramFromSocket() {
+std::vector<uint8_t> ThalesRemoteConnection::readTelegramFromSocket() {
 
+#ifdef _WIN32
     int received_bytes;
     int total_received_bytes = 0;
+#else
+    ssize_t received_bytes;
+    size_t total_received_bytes = 0;
+#endif
+
     char header_bytes[3];
     unsigned short *length_data = reinterpret_cast<unsigned short*>(header_bytes);
-    std::string result;
 
     do {
 
@@ -224,41 +315,40 @@ std::string ThalesRemoteConnection::readTelegramFromSocket() {
         // Quit if the socket has been shut down.
         if (received_bytes == 0) {
 
-            return result;
+            return std::vector<uint8_t>();
         }
 
+#ifdef _WIN32
         total_received_bytes += received_bytes;
+#else
+        total_received_bytes += static_cast<size_t>(received_bytes);
+#endif
 
     } while (total_received_bytes < 3);
 
-    // After the length is known prepare some buffer for the incoming data.
-    char *receiving_buffer = new char[*length_data + 1];
-
-    // Add a trailing zero because the received content will be stored in a std::string.
-    receiving_buffer[*length_data] = '\0';
+    std::vector<uint8_t> incoming_packet;
+    incoming_packet.resize(*length_data);
 
     total_received_bytes = 0;
 
     do {
 
-        received_bytes = recv(this->socket_handle, &receiving_buffer[total_received_bytes], *length_data - total_received_bytes, 0);
+        received_bytes = recv(this->socket_handle, reinterpret_cast<char *>(incoming_packet.data() + total_received_bytes), *length_data - total_received_bytes, 0);
 
         if (received_bytes == 0) {
 
-            delete receiving_buffer;
-            return result;
+            return std::vector<uint8_t>();
         }
 
+#ifdef _WIN32
         total_received_bytes += received_bytes;
+#else
+        total_received_bytes += static_cast<size_t>(received_bytes);
+#endif
 
     } while (total_received_bytes < *length_data);
 
-    result.append(receiving_buffer);
-
-    // clean up the reserved buffer memory
-    delete receiving_buffer;
-
-    return result;
+    return incoming_packet;
 }
 
 void ThalesRemoteConnection::telegramListenerJob() {
@@ -266,9 +356,9 @@ void ThalesRemoteConnection::telegramListenerJob() {
     do {
 
         // Most of the time the thread will be blocking here
-        std::string telegram = readTelegramFromSocket();
+        std::vector<uint8_t> telegram = readTelegramFromSocket();
 
-        if (telegram.length() > 0) {
+        if (telegram.size() > 0) {
 
             this->receivedTelegramsGuard.lock();
 
@@ -300,9 +390,22 @@ void ThalesRemoteConnection::stopTelegramListener() {
 
     this->receiving_worker_is_running = false;
     this->receivingWorker->join();
+
+    this->telegramsAvailableMutex.unlock();
 }
 
 std::chrono::milliseconds ThalesRemoteConnection::getCurrentTimeInMilliseconds() const {
 
     return std::chrono::duration_cast<std::chrono::milliseconds >(std::chrono::system_clock::now().time_since_epoch());
+}
+
+void ThalesRemoteConnection::closeSocket() {
+
+#ifdef _WIN32
+        closesocket(this->socket_handle);
+#else
+        close(this->socket_handle);
+#endif
+
+    this->socket_handle = INVALID_SOCKET;
 }

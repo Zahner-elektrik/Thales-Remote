@@ -82,6 +82,10 @@ public:
     void setFrequency(double frequency);
     void setAmplitude(double amplitude);
 
+
+    void setValue(std::string name, double value);
+    void setValue(std::string name, int value);
+
     /** Sets the number of periods to average for one impedance measurement.
      *
      * \param [in] number_of_periods the number of periods / waves to average.
@@ -115,6 +119,15 @@ public:
 protected:
 
     double requestValueAndParseUsingRegexp(std::string command, std::regex pattern);
+
+    /** Converts a string to double.
+     *
+     * This needed to be added because the numberical strings delivered
+     * by Thales could not be parsed by std::stod in some cases.
+     *
+     * \return the value which was previously coded as string.
+     */
+    double stringToDobule(std::string string);
 
     ThalesRemoteConnection * const remoteConnection;
 };

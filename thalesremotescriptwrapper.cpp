@@ -33,16 +33,15 @@ ThalesRemoteScriptWrapper::ThalesRemoteScriptWrapper(ThalesRemoteConnection * co
 }
 
 std::string ThalesRemoteScriptWrapper::executeRemoteCommand(std::string command) {
-    return remoteConnection->sendAndWaitForReply("1:" + command + ":", 2);
+    return remoteConnection->sendStringAndWaitForReplyString("1:" + command + ":", 2);
 }
 
 void ThalesRemoteScriptWrapper::forceThalesIntoRemoteScript() {
 
-    remoteConnection->sendAndWaitForReply("<\x02>,ScriptRemote", 0x80);
+    remoteConnection->sendStringAndWaitForReplyString("2,ScriptRemote", 0x80);
 }
 
-double ThalesRemoteScriptWrapper::getCurrent()
-{
+double ThalesRemoteScriptWrapper::getCurrent() {
 
     return this->requestValueAndParseUsingRegexp("CURRENT", std::regex("current=\\s*(.*?)A?:"));
 }
@@ -54,12 +53,13 @@ double ThalesRemoteScriptWrapper::getPotential() {
 
 void ThalesRemoteScriptWrapper::setCurrent(double current) {
 
-    this->executeRemoteCommand("Cset=" + std::to_string(current));
+    this->setValue("Cset", current);
 }
 
 void ThalesRemoteScriptWrapper::setPotential(double potential) {
 
-    this->executeRemoteCommand("Pset=" + std::to_string(potential));
+
+    this->setValue("Pset", potential);
 }
 
 void ThalesRemoteScriptWrapper::enablePotentiostat(bool enabled) {
@@ -104,12 +104,22 @@ void ThalesRemoteScriptWrapper::setPotentiostatMode(ThalesRemoteScriptWrapper::P
 
 void ThalesRemoteScriptWrapper::setFrequency(double frequency) {
 
-    this->executeRemoteCommand("Frq=" + std::to_string(frequency));
+    this->setValue("Frq", frequency);
 }
 
 void ThalesRemoteScriptWrapper::setAmplitude(double amplitude) {
 
-    this->executeRemoteCommand("Ampl=" + std::to_string(amplitude * 1e3));
+    this->setValue("Ampl", amplitude * 1e3);
+}
+
+void ThalesRemoteScriptWrapper::setValue(std::string name, double value) {
+
+    this->executeRemoteCommand(name + "=" + std::to_string(value));
+}
+
+void ThalesRemoteScriptWrapper::setValue(std::string name, int value) {
+
+    this->executeRemoteCommand(name + "=" + std::to_string(value));
 }
 
 void ThalesRemoteScriptWrapper::setNumberOfPeriods(int number_of_periods) {
@@ -133,6 +143,7 @@ std::complex<double> ThalesRemoteScriptWrapper::getImpedance() {
 
     std::string reply = this->executeRemoteCommand("IMPEDANCE");
 
+
     std::regex replyStringPattern("impedance=\\s*(.*?),(.*?):");
     std::smatch match;
 
@@ -140,7 +151,7 @@ std::complex<double> ThalesRemoteScriptWrapper::getImpedance() {
 
     if (match.size() > 2) {
 
-        result = std::complex<double>(std::stod(match.str(1)), std::stod(match.str(2)));
+        result = std::complex<double>(this->stringToDobule(match.str(1)), this->stringToDobule(match.str(2)));
     }
 
     return result;
@@ -162,8 +173,8 @@ std::complex<double> ThalesRemoteScriptWrapper::getImpedance(double frequency, d
     return this->getImpedance();
 }
 
-double ThalesRemoteScriptWrapper::requestValueAndParseUsingRegexp(std::string command, std::regex pattern)
-{
+double ThalesRemoteScriptWrapper::requestValueAndParseUsingRegexp(std::string command, std::regex pattern) {
+
     double result = std::nan("1");
 
     std::string reply = this->executeRemoteCommand(command);
@@ -175,8 +186,18 @@ double ThalesRemoteScriptWrapper::requestValueAndParseUsingRegexp(std::string co
 
     if (match.size() > 1) {
 
-        result = std::stod(match.str(1));
+        result = this->stringToDobule(match.str(1));
     }
 
     return result;
+}
+
+double ThalesRemoteScriptWrapper::stringToDobule(std::string string) {
+
+    std::stringstream stream(string);
+    double number;
+
+    stream >> number;
+
+    return number;
 }

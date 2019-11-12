@@ -30,7 +30,7 @@
 #include "thalesremotescriptwrapper.h"
 
 
-#define TARGET_HOST "192.168.2.78"
+#define TARGET_HOST "localhost"
 
 void spectrum(ThalesRemoteScriptWrapper &scriptHandle, double lower_frequency, double upper_frequency, int number_of_points);
 void printImpedance(std::complex<double> impedance);

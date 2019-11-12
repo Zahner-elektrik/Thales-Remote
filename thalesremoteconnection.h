@@ -32,19 +32,38 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <unistd.h>
 #include <queue>
 #include <thread>
 #include <mutex>
+#include <vector>
+
+#ifdef _WIN32
+
+#define MSG_MORE 0
+#define SHUT_RD 0
+
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#else
+
+#define SOCKET int
+#define INVALID_SOCKET -1
+
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netdb.h>
+
+#endif
 
 class ThalesRemoteConnection
 {
 public:
 
     ThalesRemoteConnection();
+    ~ThalesRemoteConnection();
 
     /** Connect to Term (The Thales Terminal)
      *
@@ -74,6 +93,7 @@ public:
      * \param [in] message_type used internally by the DevCli dll. Depends on context. Most of the time 2.
      */
     void sendTelegram(std::string payload, char message_type);
+    void sendTelegram(std::vector<unsigned char> payload, unsigned char message_type);
 
     /** Block infinitely until the next Telegram is arriving.
      *
@@ -81,7 +101,8 @@ public:
      *
      * \returns the last received telegram or an empty string if someting went wrong.
      */
-    std::string waitForTelegram();
+    std::string waitForStringTelegram();
+    std::vector<uint8_t> waitForTelegram();
 
     /** Block maximal <timeout> milliseconds while waiting for an incoming telegram.
      *
@@ -89,13 +110,15 @@ public:
      *
      * \returns the last received telegram or an empty string if the timeout was reached or something went wrong.
      */
-    std::string waitForTelegram(const std::chrono::duration<int, std::milli> timeout);
+    std::string waitForStringTelegram(const std::chrono::duration<int, std::milli> timeout);
+    std::vector<uint8_t> waitForTelegram(const std::chrono::duration<int, std::milli> timeout);
 
     /** Immediately return the last received telegram.
      *
      * \returns the last received telegram or an empty string if no telegram was received or something went wrong.
      */
-    std::string receiveTelegram();
+    std::string receiveStringTelegram();
+    std::vector<uint8_t> receiveTelegram();
 
     /** Convenience function: Send a telegram and wait for it's reply.
      *
@@ -106,7 +129,7 @@ public:
      * \warning If the queue is not empty the last received telegram will be returned. Recommended to flush the queue first.
      * \sa clearIncomingTelegramQueue();
      */
-    std::string sendAndWaitForReply(std::string payload, char message_type);
+    std::string sendStringAndWaitForReplyString(std::string payload, char message_type);
 
     /** Checks if there is some telegram in the queue.
      *
@@ -126,10 +149,10 @@ protected:
 
     static const int term_port = 260;
 
-    int socket_handle;
+    SOCKET socket_handle;
 
     std::mutex receivedTelegramsGuard;
-    std::queue<std::string> receivedTelegrams;
+    std::queue< std::vector<uint8_t> > receivedTelegrams;
 
     std::timed_mutex telegramsAvailableMutex;
 
@@ -148,10 +171,12 @@ protected:
     void stopTelegramListener();
 
     /** Reads the raw telegram structure from the socket stream. */
-    std::string readTelegramFromSocket();
+    std::vector<uint8_t> readTelegramFromSocket();
 
     /** Helper function getting the current time in milliseconds. */
     std::chrono::milliseconds getCurrentTimeInMilliseconds() const;
+
+    void closeSocket();
 
 };
 
